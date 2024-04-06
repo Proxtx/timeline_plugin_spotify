@@ -1,10 +1,10 @@
 use {
     crate::{
-        cache::Cache, config::Config, db::{Database, Event}, error, Plugin as _, PluginData
-    }, base64::Engine, chrono::Utc, futures::{task::ArcWake, StreamExt}, rocket::{fs::NamedFile, get, http::Status, routes, serde::json::Json, State}, serde::{Deserialize, Serialize}, serde_json::json, std::{f64::consts::E, path::PathBuf, sync::Arc}, tokio::sync::RwLock, types::{
-        api::{APIError, APIResult, AvailablePlugins, CompressedEvent},
+        cache::Cache,db::{Database, Event}, error, Plugin as _, PluginData
+    }, base64::Engine, chrono::Utc, futures::StreamExt, mongodb::{bson::doc, options::FindOneOptions}, rocket::{get, routes, State}, serde::{Deserialize, Serialize}, std::sync::Arc, tokio::sync::RwLock, types::{
+        api::CompressedEvent,
         timing::Timing,
-    }
+    }, url::Url
 };
 
 #[derive(Deserialize)]
@@ -60,45 +60,174 @@ impl crate::Plugin for Plugin {
                 + Send,
         >> 
     {
-        Box::pin(async move { Ok(Vec::new()) })
+        let filter = Database::combine_documents(Database::generate_find_plugin_filter(Plugin::get_type()), Database::combine_documents(Database::generate_range_filter(query_range), doc! {
+                "event.event_type": "Song"
+        }));
+        let database = self.plugin_data.database.clone();
+        Box::pin(async move { 
+            let mut cursor = database
+                .get_events::<Song>()
+                .find(filter, None)
+                .await?;
+            let mut result = Vec::new();
+            while let Some(v) = cursor.next().await {
+                let t = v?;
+                result.push(CompressedEvent {
+                    title: t.event.name.clone(),
+                    time: t.timing,
+                    data: Box::new(t.event),
+                })
+            }
+
+            Ok(result)
+        })
     }
 
     fn request_loop<'a>(
             &'a self,
         ) -> std::pin::Pin<Box<dyn futures::Future<Output = Option<chrono::Duration>> + Send + 'a>> {
         Box::pin(async move {
-            self.update_access_token().await.unwrap();
-            Some(chrono::TimeDelta::try_minutes(2).unwrap())
+            match self.save_current_song().await {
+                Ok(_) => {
+
+                },
+                Err(e) => {
+                    error::error_string(self.plugin_data.database.clone(), e, Some(Plugin::get_type()))
+                }
+            }
+            Some(chrono::TimeDelta::try_seconds(30).unwrap())
         })
+    }
+
+    fn get_routes() -> Vec<rocket::Route>
+        where
+            Self: Sized, {
+        routes![get_cover]
+    }
+}
+
+#[get("/<url>")]
+async fn get_cover(database: &State<Arc<Database>>, url: &str) -> Option<Vec<u8>> {
+    println!("{}", url);
+    match database.get_events::<ImageData>().find_one(Database::combine_documents(Database::generate_find_plugin_filter(Plugin::get_type()), doc! {
+        "event.event_type": "ImageData",
+        "event.url": url
+    }), None).await {
+        Ok(Some(v)) => {
+            Some(base64::prelude::BASE64_STANDARD.decode(v.event.data).unwrap())
+        }
+        _ => {
+            None
+        }
     }
 }
 
 impl Plugin {
-    async fn get_current_song (&self) {
+    async fn save_current_song (&self) -> Result<(), String> {
+        let song = match self.get_current_song().await? {
+            Some(v) => v,
+            None => {
+                return Ok(());
+            }
+        };
+        let last_song = self.plugin_data.database.get_events::<Song>().find_one(Database::combine_documents(Database::generate_find_plugin_filter(Plugin::get_type()), doc! {"event.event_type": "Song"}), FindOneOptions::builder().sort(doc! {
+            "timing.0": -1
+        }).build()).await;
+        let is_equal_to_last_song = match last_song {
+            Ok(v) => match v {
+                Some(v) => {
+                    v.event.id == song.id
+                }
+                None => false
+            }
+            Err(e) => {
+                return Err(format!("Unable to find last song: {}", e));
+            }
+        };
+        if is_equal_to_last_song {
+            return Ok(());
+        }
+
+        let cnt = match self.plugin_data.database.get_events::<ImageData>().count_documents(Database::combine_documents(Database::generate_find_plugin_filter(Plugin::get_type()), doc! {
+            "event.url": song.image.to_string(),
+            "event.event_type": "ImageData"
+        }), None).await {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(format!("Unable to check if album cover is present: {}", e));
+            }
+        };
+
+        let timing = Timing::Instant(Utc::now());
+        
+        if cnt < 1 {
+            let buffer = match reqwest::get(song.image.to_string()).await {
+                Ok(v) => {
+                    match v.bytes().await {
+                        Ok(v) => {
+                            base64::prelude::BASE64_STANDARD.encode(v)
+                        }
+                        Err(e) => {
+                            return Err(format!("Unable to read album cover response: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(format!("Unable to fetch album cover: {}", e));
+                }
+            };
+            match self.plugin_data.database.register_single_event(&Event { timing: timing.clone(), id: song.image.to_string(), plugin: Plugin::get_type(), event: ImageData {
+                data: buffer,
+                url: song.image.to_string(),
+                event_type: PluginEventType::ImageData
+            }}).await {
+                Ok(_v) => {},
+                Err(e) => {
+                    return Err(format!("Unable to register database event: {}", e));
+                }
+            }
+        };
+
+        match self.plugin_data.database.register_single_event(&Event { id: format!("{}@{}", song.id, serde_json::to_string(&timing).unwrap()), timing, plugin: Plugin::get_type(), event: song }).await {
+            Ok(_v) => {
+
+            },
+            Err(e) => {
+                return Err(format!("Unable to register song to database: {}", e));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn get_current_song (&self) -> Result<Option<Song>, String> {
         let url = "https://api.spotify.com/v1/me/player";
-        let access_token;
+        let mut access_token;
         {
             access_token = self.cache.read().await.get().access_token.clone();
+        }
+
+        if access_token == String::default() {
+            access_token = "update_access_token".to_string();
         }
 
         let client = reqwest::Client::new();
         let res = match client.get(url).header("Authorization", format!("Bearer {}", access_token)).send().await {
             Ok(v) => v,
             Err(e) => {
-                error::error(self.plugin_data.database.clone(), &e, Some(Plugin::get_type()));
-                return;
+                return Err(format!("Unable to perform spotify player request: {}", &e));
             }
         };
 
         let status = res.status();
 
         if status == reqwest::StatusCode::NO_CONTENT {
-            return;
+            return Ok(None);
         }
 
         if status != reqwest::StatusCode::OK {
-            if status == 401 {
-                let e = match res.text().await {
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                let _e = match res.text().await {
                     Ok(v) => {
                         v
                     }
@@ -106,24 +235,38 @@ impl Plugin {
                         format!("Unable to read request text: {}", e)
                     }
                 };
-                error::error_string(self.plugin_data.database.clone(), format!("Unable to fetch spotify song: {}", e), Some(Plugin::get_type()))
+                if let Err(e) = self.update_access_token().await {
+                    return Err(format!("Unable to update access token: {}", e))
+                }
+                //return Err(format!("Unable to fetch spotify song. Refreshing Access Token: {}", e))
+                return Ok(None)
             }
-            if let Err(e) = self.update_access_token().await {
-                error::error(self.plugin_data.database.clone(), &e, Some(Plugin::get_type()))
-            }
-
-            return;
+            return Err("Spotify API answered with an unknown http code".to_string());
         }
 
         let text = match res.text().await {
             Ok(v) => v,
             Err(e) => {
-                error::error(self.plugin_data.database.clone(), &e, Some(Plugin::get_type()));
-                return;
+                return Err(format!("Unable to read text from API Request: {}", &e));
             }
         };
 
-        //let res = 
+        let mut res: PlayerData = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(format!("Unable to parse spotify API response: {}", &e));
+            }
+        };
+
+        res.item.album.images.sort_by(|a,b| b.height.cmp(&a.height));
+
+        Ok(Some(Song {
+            name: res.item.name,
+            artist: res.item.artists.into_iter().map(|v| {v.name}).collect::<Vec<_>>().join(", "),
+            image: res.item.album.images.remove(0).url,
+            id: res.item.id,
+            event_type: PluginEventType::Song
+        }))
     }
 
     async fn update_access_token (&self) -> Result<(), reqwest::Error> {
@@ -151,7 +294,58 @@ impl Plugin {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+enum PluginEventType {
+    Song,
+    ImageData
+}
+
+#[derive(Deserialize, Serialize)]
+struct ImageData {
+    pub url: String,
+    pub data: String,
+    pub event_type: PluginEventType
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Song {
+    pub name: String,
+    pub artist: String, 
+    pub image: Url,
+    pub id: String,
+    pub event_type: PluginEventType
+}
+
 #[derive(Deserialize)]
 struct AccessTokenRequset {
     access_token: String
+}
+
+#[derive(Deserialize)]
+struct PlayerData {
+    item: PlayerDataItem
+}
+
+#[derive(Deserialize)]
+struct PlayerDataItem {
+    id: String,
+    name: String,
+    artists: Vec<PlayerDataArtist>,
+    album: PlayerDataAlbum
+}
+
+#[derive(Deserialize)]
+struct PlayerDataArtist {
+    name: String
+}
+
+#[derive(Deserialize)]
+struct PlayerDataAlbum {
+    images: Vec<PlayerDataImage>
+}
+
+#[derive(Deserialize)]
+struct PlayerDataImage {
+    height: u64,
+    url: Url
 }
