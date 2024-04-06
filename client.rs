@@ -22,7 +22,7 @@ impl crate::Plugin for Plugin {
         let data = data.get_data::<Song>()?;
         Ok(Box::new(move || -> View {
             view! {
-                <div style="display: flex; flex-direction: row; width: 100%; gap: calc(var(--contentSpacing) * 0.5); background-color: var(--accentColor2);align-items: start;">
+                <div style="display: flex; flex-direction: row; width: 100%; gap: calc(var(--contentSpacing) * 0.5); background-color: var(--accentColor1);align-items: start;">
                     <img
                         style="width: calc(var(--contentSpacing) * 10); aspect-ratio: 1;"
                         src=move || {
