@@ -37,7 +37,7 @@ impl crate::Plugin for Plugin {
         )
         .unwrap_or_else(|e| panic!("Unable to init spotify plugin! Provided config does not fit the requirements: {}", e));
 
-    let cache: Cache<AccessTokenCache> =
+        let cache: Cache<AccessTokenCache> =
             Cache::load::<Plugin>().await.unwrap_or_else(|e| {
                 panic!(
                     "Failed to init media_scan plugin! Unable to load cache: {}",
@@ -108,7 +108,6 @@ impl crate::Plugin for Plugin {
 
 #[get("/<url>")]
 async fn get_cover(database: &State<Arc<Database>>, url: &str) -> Option<Vec<u8>> {
-    println!("{}", url);
     match database.get_events::<ImageData>().find_one(Database::combine_documents(Database::generate_find_plugin_filter(Plugin::get_type()), doc! {
         "event.event_type": "ImageData",
         "event.url": url
