@@ -19,6 +19,7 @@ struct AccessTokenCache {
     pub access_token: String
 }
 
+#[allow(unused)]
 pub struct Plugin {
     plugin_data: PluginData,
     config: ConfigData,
