@@ -1,6 +1,6 @@
 use {
     crate::{
-        cache::Cache,db::{Database, Event}, error, Plugin as _, PluginData
+        cache::Cache,db::{Database, Event}, Plugin as _, PluginData
     }, base64::Engine, chrono::Utc, futures::StreamExt, mongodb::{bson::doc, options::FindOneOptions}, rocket::{get, routes, State}, serde::{Deserialize, Serialize}, std::sync::Arc, tokio::sync::RwLock, types::{
         api::CompressedEvent,
         timing::Timing,
@@ -93,7 +93,7 @@ impl crate::Plugin for Plugin {
 
                 },
                 Err(e) => {
-                    error::error_string(self.plugin_data.database.clone(), e, Some(Plugin::get_type()))
+                    self.plugin_data.report_error_string(e)
                 }
             }
             Some(chrono::TimeDelta::try_seconds(30).unwrap())
@@ -281,7 +281,7 @@ impl Plugin {
         let token: AccessTokenRequset =  match serde_json::from_str(&txt) {
             Ok(v) => v,
             Err(e) => {
-                error::error(self.plugin_data.database.clone(), &e, Some(Plugin::get_type()));
+                self.plugin_data.report_error(&e);
                 return Ok(());
             }
         };
