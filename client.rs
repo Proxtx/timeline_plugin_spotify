@@ -2,23 +2,21 @@ use {
     leptos::{view, IntoView, View}, 
     url::Url,
     serde::{Deserialize, Serialize},
-    crate::plugin_manager::PluginData
+    crate::plugin_manager::{PluginData, PluginEventData}
 };
 
 pub struct Plugin {
-    plugin_data: PluginData,
 }
 
 impl crate::Plugin for Plugin {
-    async fn new(data: crate::plugin_manager::PluginData) -> Self
+    async fn new(_data: PluginData) -> Self
         where
             Self: Sized {
             Plugin {
-                plugin_data: data
             }
     }
 
-    fn get_component(&self, data: crate::plugin_manager::PluginEventData) -> crate::event_manager::EventResult<Box<dyn FnOnce() -> leptos::View>> {
+    fn get_component(&self, data: PluginEventData) -> crate::plugin_manager::EventResult<Box<dyn FnOnce() -> leptos::View>> {
         let data = data.get_data::<Song>()?;
         Ok(Box::new(move || -> View {
             view! {
